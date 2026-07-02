@@ -1,0 +1,37 @@
+# Entorno virtual
+.venv/
+venv/
+
+# Caché de Python
+__pycache__/
+*.py[cod]
+
+# Carpetas que no quieres subir
+tpi/
+images/
+extracted-data/
+
+# Archivos generados durante las pruebas
+test/steps/
+test/out/
+
+# Datos locales
+data/
+
+# Modelos y pesos pesados
+*.pt
+*.pth
+*.onnx
+*.weights
+
+# Archivos temporales y logs
+*.log
+*.tmp
+
+# Configuración de editores
+.vscode/
+.idea/
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db

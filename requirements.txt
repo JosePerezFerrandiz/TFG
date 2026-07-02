@@ -1,0 +1,17 @@
+numpy
+opencv-python
+pandas
+ultralytics
+python-chess
+svglib
+reportlab
+requests
+scipy
+pyclipper
+matplotlib
+h5py
+tables
+keras
+tensorflow
+scikit-learn
+dill
