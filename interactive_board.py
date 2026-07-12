@@ -13,14 +13,9 @@ UNICODE_PIECES = {
 
 class InteractiveBoard(ttk.Frame):
     """
-    Tablero interactivo para Tkinter basado en python-chess.
-
-    Uso típico:
-        board_widget = InteractiveBoard(parent, on_position_changed=callback)
-        board_widget.pack(fill="both", expand=True)
-        board_widget.set_fen(fen_detectado)
-
-    callback(new_fen, move_uci) se ejecuta cuando el usuario hace un movimiento legal.
+    Tablero interactivo responsive para Tkinter basado en python-chess.
+    - El tablero se redimensiona automáticamente para caber en el espacio disponible.
+    - Sigue funcionando con clic en origen + clic en destino.
     """
 
     def __init__(
@@ -28,15 +23,23 @@ class InteractiveBoard(ttk.Frame):
         parent,
         on_position_changed: Optional[Callable[[str, str], None]] = None,
         square_size: int = 72,
+        min_square_size: int = 34,
+        max_square_size: int = 96,
         light_color: str = "#f0d9b5",
         dark_color: str = "#b58863",
         selected_color: str = "#d6f36a",
         legal_dot_color: str = "#2f855a",
         last_move_color: str = "#f6f669",
+        board_padding: int = 10,
     ):
         super().__init__(parent)
 
+        self.base_square_size = square_size
         self.square_size = square_size
+        self.min_square_size = min_square_size
+        self.max_square_size = max_square_size
+        self.board_padding = board_padding
+
         self.light_color = light_color
         self.dark_color = dark_color
         self.selected_color = selected_color
@@ -50,17 +53,15 @@ class InteractiveBoard(ttk.Frame):
         self.legal_targets: List[chess.Square] = []
         self.last_move: Optional[chess.Move] = None
 
-        board_px = 8 * self.square_size
-        self.canvas = tk.Canvas(
-            self,
-            width=board_px,
-            height=board_px,
-            highlightthickness=0,
-            bd=0,
-        )
+        self.board_origin_x = self.board_padding
+        self.board_origin_y = self.board_padding
+        self.board_px = 8 * self.square_size
+
+        self.canvas = tk.Canvas(self, highlightthickness=0, bd=0)
         self.canvas.pack(fill="both", expand=True)
 
         self.canvas.bind("<Button-1>", self._on_click)
+        self.canvas.bind("<Configure>", self._on_canvas_resize)
 
         self.draw_board()
 
@@ -119,8 +120,33 @@ class InteractiveBoard(ttk.Frame):
         self.draw_board()
         return True
 
+    def _on_canvas_resize(self, _event=None) -> None:
+        width = max(1, self.canvas.winfo_width())
+        height = max(1, self.canvas.winfo_height())
+
+        usable = min(width, height) - 2 * self.board_padding
+        usable = max(8 * self.min_square_size, usable)
+
+        new_square_size = max(
+            self.min_square_size,
+            min(self.max_square_size, usable // 8)
+        )
+
+        if new_square_size != self.square_size or width != self.canvas.winfo_reqwidth() or height != self.canvas.winfo_reqheight():
+            self.square_size = new_square_size
+            self.board_px = 8 * self.square_size
+            self.board_origin_x = max(self.board_padding, (width - self.board_px) // 2)
+            self.board_origin_y = max(self.board_padding, (height - self.board_px) // 2)
+            self.draw_board()
+
     def draw_board(self) -> None:
         self.canvas.delete("all")
+
+        width = max(1, self.canvas.winfo_width())
+        height = max(1, self.canvas.winfo_height())
+        self.board_px = 8 * self.square_size
+        self.board_origin_x = max(self.board_padding, (width - self.board_px) // 2)
+        self.board_origin_y = max(self.board_padding, (height - self.board_px) // 2)
 
         for row in range(8):
             for col in range(8):
@@ -139,25 +165,25 @@ class InteractiveBoard(ttk.Frame):
 
                 if col == 0:
                     self.canvas.create_text(
-                        x1 + 10,
-                        y1 + 12,
+                        x1 + max(8, self.square_size * 0.14),
+                        y1 + max(10, self.square_size * 0.16),
                         text=str(8 - row),
-                        font=("Arial", 9, "bold"),
+                        font=("Arial", max(8, int(self.square_size * 0.14)), "bold"),
                         anchor="w",
                     )
                 if row == 7:
                     self.canvas.create_text(
-                        x2 - 10,
-                        y2 - 10,
+                        x2 - max(8, self.square_size * 0.14),
+                        y2 - max(8, self.square_size * 0.14),
                         text=chr(ord("a") + col),
-                        font=("Arial", 9, "bold"),
+                        font=("Arial", max(8, int(self.square_size * 0.14)), "bold"),
                         anchor="e",
                     )
 
                 if square in self.legal_targets:
                     cx = (x1 + x2) / 2
                     cy = (y1 + y2) / 2
-                    radius = max(6, self.square_size // 9)
+                    radius = max(5, self.square_size // 9)
                     self.canvas.create_oval(
                         cx - radius,
                         cy - radius,
@@ -174,7 +200,7 @@ class InteractiveBoard(ttk.Frame):
                         (x1 + x2) / 2,
                         (y1 + y2) / 2,
                         text=symbol,
-                        font=("Segoe UI Symbol", max(18, int(self.square_size * 0.52))),
+                        font=("Segoe UI Symbol", max(16, int(self.square_size * 0.52))),
                     )
 
     def _on_click(self, event) -> None:
@@ -219,19 +245,28 @@ class InteractiveBoard(ttk.Frame):
             self.draw_board()
 
     def _coords_to_square(self, x: int, y: int) -> Optional[chess.Square]:
-        board_px = 8 * self.square_size
-        if not (0 <= x < board_px and 0 <= y < board_px):
+        if not (
+            self.board_origin_x <= x < self.board_origin_x + self.board_px and
+            self.board_origin_y <= y < self.board_origin_y + self.board_px
+        ):
             return None
 
-        col = x // self.square_size
-        row = y // self.square_size
-        return chess.square(col, 7 - row)
+        rel_x = x - self.board_origin_x
+        rel_y = y - self.board_origin_y
+
+        col = rel_x // self.square_size
+        row = rel_y // self.square_size
+
+        if not (0 <= col < 8 and 0 <= row < 8):
+            return None
+
+        return chess.square(int(col), 7 - int(row))
 
     def _square_bbox(self, square: chess.Square):
         col = chess.square_file(square)
         row = 7 - chess.square_rank(square)
-        x1 = col * self.square_size
-        y1 = row * self.square_size
+        x1 = self.board_origin_x + col * self.square_size
+        y1 = self.board_origin_y + row * self.square_size
         x2 = x1 + self.square_size
         y2 = y1 + self.square_size
         return x1, y1, x2, y2
@@ -264,24 +299,16 @@ if __name__ == "__main__":
         print("Nueva FEN:", new_fen)
 
     root = tk.Tk()
-    root.title("Demo InteractiveBoard")
+    root.title("Demo InteractiveBoard responsive")
+    root.geometry("700x760")
 
     board_widget = InteractiveBoard(root, on_position_changed=on_changed, square_size=72)
-    board_widget.pack(padx=10, pady=10)
+    board_widget.pack(fill="both", expand=True, padx=10, pady=10)
 
     controls = ttk.Frame(root)
     controls.pack(fill="x", padx=10, pady=(0, 10))
 
-    ttk.Button(
-        controls,
-        text="Posición inicial",
-        command=board_widget.reset_start_position
-    ).pack(side="left", padx=(0, 8))
-
-    ttk.Button(
-        controls,
-        text="Deshacer",
-        command=board_widget.undo_last_move
-    ).pack(side="left")
+    ttk.Button(controls, text="Posición inicial", command=board_widget.reset_start_position).pack(side="left", padx=(0, 8))
+    ttk.Button(controls, text="Deshacer", command=board_widget.undo_last_move).pack(side="left")
 
     root.mainloop()
