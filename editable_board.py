@@ -1,7 +1,7 @@
 
 import tkinter as tk
 from tkinter import ttk
-from typing import Callable, Optional, List
+from typing import Callable, Optional, List, Tuple
 import chess
 
 
@@ -10,13 +10,35 @@ UNICODE_PIECES = {
     "p": "♟", "n": "♞", "b": "♝", "r": "♜", "q": "♛", "k": "♚",
 }
 
+PIECE_MENU_ITEMS: List[Tuple[str, str]] = [
+    ("Peón blanco", "P"),
+    ("Caballo blanco", "N"),
+    ("Alfil blanco", "B"),
+    ("Torre blanca", "R"),
+    ("Dama blanca", "Q"),
+    ("Rey blanco", "K"),
+    ("Peón negro", "p"),
+    ("Caballo negro", "n"),
+    ("Alfil negro", "b"),
+    ("Torre negra", "r"),
+    ("Dama negra", "q"),
+    ("Rey negro", "k"),
+]
 
-class InteractiveBoard(ttk.Frame):
-    """
-    Tablero interactivo responsive para Tkinter basado en python-chess.
-    - El tablero se redimensiona automáticamente para caber en el espacio disponible.
-    - Sigue funcionando con clic en origen + clic en destino.
-    """
+
+class EditableBoard(ttk.Frame):
+    '''
+    Tablero responsive con dos modos:
+    - analysis: movimientos legales de ajedrez
+    - edit: edición libre de la posición
+
+    En modo edit:
+    - clic izquierdo: mover pieza libremente
+    - clic derecho: menú contextual para borrar o cambiar la pieza de una casilla
+
+    Callback:
+        on_position_changed(new_fen, action)
+    '''
 
     def __init__(
         self,
@@ -49,9 +71,13 @@ class InteractiveBoard(ttk.Frame):
         self.on_position_changed = on_position_changed
 
         self.board = chess.Board()
+        self.initial_fen = self.board.fen()
+
+        self.edit_mode = False
         self.selected_square: Optional[chess.Square] = None
         self.legal_targets: List[chess.Square] = []
         self.last_move: Optional[chess.Move] = None
+        self.edit_history: List[str] = []
 
         self.board_origin_x = self.board_padding
         self.board_origin_y = self.board_padding
@@ -60,56 +86,57 @@ class InteractiveBoard(ttk.Frame):
         self.canvas = tk.Canvas(self, highlightthickness=0, bd=0)
         self.canvas.pack(fill="both", expand=True)
 
-        self.canvas.bind("<Button-1>", self._on_click)
+        self.canvas.bind("<Button-1>", self._on_left_click)
+        self.canvas.bind("<Button-3>", self._on_right_click)
         self.canvas.bind("<Configure>", self._on_canvas_resize)
+
+        self.context_menu = tk.Menu(self, tearoff=0)
 
         self.draw_board()
 
     def set_fen(self, fen: str) -> None:
         self.board = chess.Board(fen)
+        self.initial_fen = fen
         self.selected_square = None
         self.legal_targets = []
         self.last_move = None
+        self.edit_history = []
         self.draw_board()
 
     def get_fen(self) -> str:
         return self.board.fen()
 
-    def reset_start_position(self) -> None:
-        self.board = chess.Board()
+    def set_edit_mode(self, enabled: bool) -> None:
+        self.edit_mode = enabled
+        self.selected_square = None
+        self.legal_targets = []
+        self.draw_board()
+
+    def toggle_edit_mode(self) -> bool:
+        self.set_edit_mode(not self.edit_mode)
+        return self.edit_mode
+
+    def reset_to_initial_position(self) -> None:
+        self.board = chess.Board(self.initial_fen)
         self.selected_square = None
         self.legal_targets = []
         self.last_move = None
+        self.edit_history = []
         self.draw_board()
+        self._emit_change("reset")
 
-    def set_position_from_board(self, board: chess.Board) -> None:
-        self.board = board.copy(stack=True)
-        self.selected_square = None
-        self.legal_targets = []
-        self.last_move = None
-        self.draw_board()
+    def undo_last_change(self) -> bool:
+        if self.edit_mode:
+            if not self.edit_history:
+                return False
+            fen = self.edit_history.pop()
+            self.board = chess.Board(fen)
+            self.selected_square = None
+            self.legal_targets = []
+            self.draw_board()
+            self._emit_change("undo")
+            return True
 
-    def apply_uci_move(self, move_uci: str) -> bool:
-        try:
-            move = chess.Move.from_uci(move_uci)
-        except ValueError:
-            return False
-
-        if move not in self.board.legal_moves:
-            return False
-
-        self.board.push(move)
-        self.last_move = move
-        self.selected_square = None
-        self.legal_targets = []
-        self.draw_board()
-
-        if self.on_position_changed:
-            self.on_position_changed(self.board.fen(), move.uci())
-
-        return True
-
-    def undo_last_move(self) -> bool:
         if not self.board.move_stack:
             return False
 
@@ -118,7 +145,15 @@ class InteractiveBoard(ttk.Frame):
         self.selected_square = None
         self.legal_targets = []
         self.draw_board()
+        self._emit_change("undo")
         return True
+
+    def _emit_change(self, action: str) -> None:
+        if self.on_position_changed:
+            self.on_position_changed(self.board.fen(), action)
+
+    def _save_edit_snapshot(self) -> None:
+        self.edit_history.append(self.board.fen())
 
     def _on_canvas_resize(self, _event=None) -> None:
         width = max(1, self.canvas.winfo_width())
@@ -132,12 +167,11 @@ class InteractiveBoard(ttk.Frame):
             min(self.max_square_size, usable // 8)
         )
 
-        if new_square_size != self.square_size or width != self.canvas.winfo_reqwidth() or height != self.canvas.winfo_reqheight():
-            self.square_size = new_square_size
-            self.board_px = 8 * self.square_size
-            self.board_origin_x = max(self.board_padding, (width - self.board_px) // 2)
-            self.board_origin_y = max(self.board_padding, (height - self.board_px) // 2)
-            self.draw_board()
+        self.square_size = new_square_size
+        self.board_px = 8 * self.square_size
+        self.board_origin_x = max(self.board_padding, (width - self.board_px) // 2)
+        self.board_origin_y = max(self.board_padding, (height - self.board_px) // 2)
+        self.draw_board()
 
     def draw_board(self) -> None:
         self.canvas.delete("all")
@@ -155,7 +189,10 @@ class InteractiveBoard(ttk.Frame):
 
                 fill = self.light_color if (row + col) % 2 == 0 else self.dark_color
 
-                if self.last_move and square in (self.last_move.from_square, self.last_move.to_square):
+                if not self.edit_mode and self.last_move and square in (
+                    self.last_move.from_square,
+                    self.last_move.to_square,
+                ):
                     fill = self.last_move_color
 
                 if self.selected_square == square:
@@ -203,11 +240,36 @@ class InteractiveBoard(ttk.Frame):
                         font=("Segoe UI Symbol", max(16, int(self.square_size * 0.52))),
                     )
 
-    def _on_click(self, event) -> None:
+        mode_text = "Modo corrección" if self.edit_mode else "Modo análisis"
+        self.canvas.create_text(
+            width - 10,
+            10,
+            text=mode_text,
+            anchor="ne",
+            font=("Segoe UI", 10, "bold"),
+        )
+
+    def _on_left_click(self, event) -> None:
         clicked_square = self._coords_to_square(event.x, event.y)
         if clicked_square is None:
             return
 
+        if self.edit_mode:
+            self._handle_edit_left_click(clicked_square)
+        else:
+            self._handle_analysis_left_click(clicked_square)
+
+    def _on_right_click(self, event) -> None:
+        if not self.edit_mode:
+            return
+
+        clicked_square = self._coords_to_square(event.x, event.y)
+        if clicked_square is None:
+            return
+
+        self._show_context_menu(clicked_square, event.x_root, event.y_root)
+
+    def _handle_analysis_left_click(self, clicked_square: chess.Square) -> None:
         clicked_piece = self.board.piece_at(clicked_square)
 
         if self.selected_square is None:
@@ -236,13 +298,73 @@ class InteractiveBoard(ttk.Frame):
             self.selected_square = None
             self.legal_targets = []
             self.draw_board()
-
-            if self.on_position_changed:
-                self.on_position_changed(self.board.fen(), move.uci())
+            self._emit_change("legal_move")
         else:
             self.selected_square = None
             self.legal_targets = []
             self.draw_board()
+
+    def _handle_edit_left_click(self, clicked_square: chess.Square) -> None:
+        clicked_piece = self.board.piece_at(clicked_square)
+
+        if self.selected_square is None:
+            if clicked_piece:
+                self.selected_square = clicked_square
+                self.draw_board()
+            return
+
+        if clicked_square == self.selected_square:
+            self.selected_square = None
+            self.draw_board()
+            return
+
+        piece = self.board.piece_at(self.selected_square)
+        if piece is None:
+            self.selected_square = None
+            self.draw_board()
+            return
+
+        self._save_edit_snapshot()
+        self.board.remove_piece_at(self.selected_square)
+        self.board.set_piece_at(clicked_square, piece)
+
+        self.selected_square = None
+        self.legal_targets = []
+        self.last_move = None
+        self.draw_board()
+        self._emit_change("edit_move")
+
+    def _show_context_menu(self, square: chess.Square, x_root: int, y_root: int) -> None:
+        self.context_menu.delete(0, "end")
+
+        self.context_menu.add_command(
+            label="Borrar pieza",
+            command=lambda sq=square: self._clear_square(sq),
+        )
+        self.context_menu.add_separator()
+
+        for label, symbol in PIECE_MENU_ITEMS:
+            self.context_menu.add_command(
+                label=label,
+                command=lambda sq=square, sym=symbol: self._set_piece_symbol(sq, sym),
+            )
+
+        self.context_menu.tk_popup(x_root, y_root)
+
+    def _clear_square(self, square: chess.Square) -> None:
+        self._save_edit_snapshot()
+        self.board.remove_piece_at(square)
+        self.selected_square = None
+        self.draw_board()
+        self._emit_change("edit_clear_square")
+
+    def _set_piece_symbol(self, square: chess.Square, symbol: str) -> None:
+        self._save_edit_snapshot()
+        piece = chess.Piece.from_symbol(symbol)
+        self.board.set_piece_at(square, piece)
+        self.selected_square = None
+        self.draw_board()
+        self._emit_change("edit_set_piece")
 
     def _coords_to_square(self, x: int, y: int) -> Optional[chess.Square]:
         if not (
@@ -294,21 +416,36 @@ class InteractiveBoard(ttk.Frame):
 
 
 if __name__ == "__main__":
-    def on_changed(new_fen: str, move_uci: str):
-        print("Movimiento:", move_uci)
+    def on_changed(new_fen: str, action: str):
+        print("Acción:", action)
         print("Nueva FEN:", new_fen)
 
     root = tk.Tk()
-    root.title("Demo InteractiveBoard responsive")
-    root.geometry("700x760")
+    root.title("Demo EditableBoard")
+    root.geometry("760x820")
 
-    board_widget = InteractiveBoard(root, on_position_changed=on_changed, square_size=72)
+    board_widget = EditableBoard(root, on_position_changed=on_changed, square_size=72)
     board_widget.pack(fill="both", expand=True, padx=10, pady=10)
 
     controls = ttk.Frame(root)
     controls.pack(fill="x", padx=10, pady=(0, 10))
 
-    ttk.Button(controls, text="Posición inicial", command=board_widget.reset_start_position).pack(side="left", padx=(0, 8))
-    ttk.Button(controls, text="Deshacer", command=board_widget.undo_last_move).pack(side="left")
+    ttk.Button(
+        controls,
+        text="Modo corrección",
+        command=board_widget.toggle_edit_mode
+    ).pack(side="left", padx=(0, 8))
+
+    ttk.Button(
+        controls,
+        text="Volver a inicio",
+        command=board_widget.reset_to_initial_position
+    ).pack(side="left", padx=(0, 8))
+
+    ttk.Button(
+        controls,
+        text="Deshacer",
+        command=board_widget.undo_last_change
+    ).pack(side="left")
 
     root.mainloop()

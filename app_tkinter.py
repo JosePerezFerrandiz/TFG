@@ -7,11 +7,11 @@ import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-from PIL import Image, ImageTk
+import chess
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-from interactive_board import InteractiveBoard
+from editable_board import EditableBoard
 from lichessAPI import LichessAPI
 
 
@@ -59,6 +59,10 @@ class ChessApp:
         self.graphs_window_id = None
 
         self._build_ui()
+
+    # ------------------------------------------------------------------
+    # UI
+    # ------------------------------------------------------------------
 
     def _build_ui(self):
         top_frame = ttk.Frame(self.root, padding=10)
@@ -132,13 +136,14 @@ class ChessApp:
         middle_frame.add(left_frame, weight=3)
         middle_frame.add(right_frame, weight=5)
 
+        # ---------------- Izquierda: tablero editable/interactivo ----------------
         board_top = ttk.Frame(left_frame)
         board_top.pack(fill="x", pady=(0, 8))
 
         self.undo_button = ttk.Button(
             board_top,
             text="Deshacer",
-            command=self.undo_interactive_move,
+            command=self.undo_board_change,
             state="disabled",
         )
         self.undo_button.pack(side="left")
@@ -150,6 +155,14 @@ class ChessApp:
             state="disabled",
         )
         self.reset_board_button.pack(side="left", padx=(8, 0))
+
+        self.correct_button = ttk.Button(
+            board_top,
+            text="Corregir posiciones",
+            command=self.toggle_correction_mode,
+            state="disabled",
+        )
+        self.correct_button.pack(side="left", padx=(8, 0))
 
         self.reanalyze_button = ttk.Button(
             board_top,
@@ -167,12 +180,15 @@ class ChessApp:
         )
         self.view_image_button.pack(side="left", padx=(8, 0))
 
-        ttk.Label(
+        self.board_help_label = ttk.Label(
             left_frame,
-            text="Haz clic en una pieza y luego en la casilla destino.",
-        ).pack(anchor="w", pady=(0, 6))
+            text="Modo análisis: clic en una pieza y luego en la casilla destino.",
+            wraplength=520,
+            justify="left",
+        )
+        self.board_help_label.pack(anchor="w", pady=(0, 6))
 
-        self.interactive_board = InteractiveBoard(
+        self.interactive_board = EditableBoard(
             left_frame,
             on_position_changed=self.on_board_position_changed,
             square_size=68,
@@ -182,11 +198,12 @@ class ChessApp:
         self.current_fen_label = ttk.Label(
             left_frame,
             text="FEN actual: -",
-            wraplength=500,
+            wraplength=520,
             justify="left",
         )
         self.current_fen_label.pack(fill="x", pady=(8, 0))
 
+        # ---------------- Derecha: tablas y gráficas ----------------
         self.notebook = ttk.Notebook(right_frame)
         self.notebook.pack(fill="both", expand=True)
 
@@ -384,6 +401,10 @@ class ChessApp:
 
         self._bind_graph_mousewheel()
 
+    # ------------------------------------------------------------------
+    # Scroll handlers
+    # ------------------------------------------------------------------
+
     def _on_tables_content_configure(self, _event=None):
         self.tables_canvas.configure(scrollregion=self.tables_canvas.bbox("all"))
 
@@ -427,23 +448,55 @@ class ChessApp:
             widget.bind("<Button-4>", self._on_mousewheel_graphs)
             widget.bind("<Button-5>", self._on_mousewheel_graphs)
 
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def has_undo_available(self):
+        return bool(self.interactive_board.board.move_stack) or bool(self.interactive_board.edit_history)
+
     def set_busy(self, busy: bool, status_text: str):
         self.status_var.set(status_text)
         self.analyze_image_button.config(state="disabled" if busy else "normal")
-        self.undo_button.config(
-            state="disabled" if busy or not self.interactive_board.board.move_stack else "normal"
-        )
-        self.reset_board_button.config(
-            state="normal" if (not busy and self.detected_fen) else "disabled"
-        )
-        self.reanalyze_button.config(
-            state="normal" if (not busy and self.current_fen) else "disabled"
-        )
+        self.undo_button.config(state="normal" if (not busy and self.has_undo_available()) else "disabled")
+        self.reset_board_button.config(state="normal" if (not busy and self.detected_fen) else "disabled")
+        self.correct_button.config(state="normal" if (not busy and self.current_fen) else "disabled")
+        self.reanalyze_button.config(state="normal" if (not busy and self.current_fen) else "disabled")
         self.view_image_button.config(
             state="normal" if (not busy and self.current_image_path and self.current_fen) else "disabled"
         )
         self.root.config(cursor="watch" if busy else "")
         self.root.update_idletasks()
+
+    def refresh_board_buttons(self):
+        self.undo_button.config(state="normal" if self.has_undo_available() else "disabled")
+        self.reset_board_button.config(state="normal" if self.detected_fen else "disabled")
+        self.correct_button.config(state="normal" if self.current_fen else "disabled")
+        self.reanalyze_button.config(state="normal" if self.current_fen else "disabled")
+        self.view_image_button.config(
+            state="normal" if (self.current_image_path and self.current_fen) else "disabled"
+        )
+
+    def get_clean_board_fen(self):
+        board = self.interactive_board.board.copy(stack=False)
+        board.castling_rights = board.clean_castling_rights()
+        board.ep_square = None
+        return board.fen()
+
+    def is_position_analyzable(self):
+        board = self.interactive_board.board
+        white_kings = len(board.pieces(chess.KING, chess.WHITE))
+        black_kings = len(board.pieces(chess.KING, chess.BLACK))
+
+        if white_kings != 1 or black_kings != 1:
+            messagebox.showwarning(
+                "Posición no válida",
+                "Para analizar la posición debe haber exactamente un rey blanco y un rey negro.\n\n"
+                "Corrige la posición antes de pulsar 'Analizar nueva posición'.",
+            )
+            return False
+
+        return True
 
     def clear_graphs(self):
         if self.pie_canvas is not None:
@@ -484,7 +537,7 @@ class ChessApp:
             self.current_fen_label.config(text=f"FEN actual: {self.current_fen}")
         else:
             self.current_fen_label.config(text="FEN actual: -")
-            
+
     def update_opening_title(self):
         opening_text = None
 
@@ -507,6 +560,10 @@ class ChessApp:
             else:
                 self.opening_title_var.set("Apertura no identificada")
 
+    # ------------------------------------------------------------------
+    # Compare window
+    # ------------------------------------------------------------------
+
     def show_compare_window(self):
         if not self.current_image_path or not self.current_fen:
             messagebox.showwarning(
@@ -515,41 +572,71 @@ class ChessApp:
             )
             return
 
-        win = tk.Toplevel(self.root)
-        win.title("Comparación: imagen original y tablero virtual")
-        win.geometry("1400x780")
-
-        container = ttk.Frame(win, padding=10)
-        container.pack(fill="both", expand=True)
-
-        left = ttk.Frame(container)
-        right = ttk.Frame(container)
-        left.pack(side="left", fill="both", expand=True, padx=(0, 8))
-        right.pack(side="left", fill="both", expand=True, padx=(8, 0))
-
-        ttk.Label(left, text="Imagen original", font=("Segoe UI", 11, "bold")).pack(anchor="center", pady=(0, 8))
-        ttk.Label(right, text="Tablero virtual", font=("Segoe UI", 11, "bold")).pack(anchor="center", pady=(0, 8))
-
-        image_label = ttk.Label(left)
-        image_label.pack(fill="both", expand=True)
+        if not os.path.exists(self.current_image_path):
+            messagebox.showerror("Error", "No se encuentra la imagen original.")
+            return
 
         try:
-            img = Image.open(self.current_image_path)
-            max_w, max_h = 620, 680
-            img.thumbnail((max_w, max_h))
-            photo = ImageTk.PhotoImage(img)
-            image_label.configure(image=photo)
-            image_label.image = photo
-        except Exception as e:
-            image_label.configure(text=f"No se pudo cargar la imagen:\n{e}")
+            from PIL import Image, ImageTk
+        except ImportError:
+            messagebox.showerror(
+                "Falta Pillow",
+                "Para visualizar imágenes JPG/PNG en esta ventana instala Pillow:\n\npip install pillow",
+            )
+            return
 
-        compare_board = InteractiveBoard(
+        win = tk.Toplevel(self.root)
+        win.title("Comparación: imagen original y tablero virtual")
+        win.geometry("1350x760")
+        win.minsize(900, 560)
+
+        main = ttk.Frame(win, padding=10)
+        main.pack(fill="both", expand=True)
+
+        paned = ttk.Panedwindow(main, orient="horizontal")
+        paned.pack(fill="both", expand=True)
+
+        left = ttk.Frame(paned, padding=5)
+        right = ttk.Frame(paned, padding=5)
+        paned.add(left, weight=1)
+        paned.add(right, weight=1)
+
+        ttk.Label(left, text="Imagen original", font=("Segoe UI", 12, "bold")).pack(anchor="center", pady=(0, 8))
+        ttk.Label(right, text="Tablero virtual actual", font=("Segoe UI", 12, "bold")).pack(anchor="center", pady=(0, 8))
+
+        image_container = ttk.Frame(left)
+        image_container.pack(fill="both", expand=True)
+
+        image_label = ttk.Label(image_container, anchor="center")
+        image_label.pack(fill="both", expand=True)
+
+        def render_image(_event=None):
+            try:
+                img = Image.open(self.current_image_path)
+                max_w = max(300, image_container.winfo_width() - 20)
+                max_h = max(300, image_container.winfo_height() - 20)
+                img.thumbnail((max_w, max_h))
+                photo = ImageTk.PhotoImage(img)
+                image_label.configure(image=photo, text="")
+                image_label.image = photo
+            except Exception as e:
+                image_label.configure(text=f"No se pudo cargar la imagen:\n{e}")
+
+        image_container.bind("<Configure>", render_image)
+        win.after(100, render_image)
+
+        compare_board = EditableBoard(
             right,
             on_position_changed=None,
             square_size=68,
         )
         compare_board.pack(fill="both", expand=True)
         compare_board.set_fen(self.current_fen)
+        compare_board.set_edit_mode(False)
+
+    # ------------------------------------------------------------------
+    # Image analysis via main.py
+    # ------------------------------------------------------------------
 
     def select_image(self):
         path = filedialog.askopenfilename(
@@ -594,9 +681,14 @@ class ChessApp:
         ]
 
         self.current_report = None
+        self.current_fen = None
+        self.detected_report = None
+        self.detected_fen = None
+        self.last_detected_opening_text = None
+        self.update_opening_title()
+        self.update_current_fen_label()
         self.clear_graphs()
         self.current_image_path = image_path
-        self.last_detected_opening_text = None
         self.set_busy(True, "Analizando imagen...")
 
         thread = threading.Thread(
@@ -649,55 +741,84 @@ class ChessApp:
 
         self.load_results(result_dir)
 
-    def on_board_position_changed(self, new_fen: str, move_uci: str):
+    # ------------------------------------------------------------------
+    # Board correction / movement
+    # ------------------------------------------------------------------
+
+    def toggle_correction_mode(self):
+        enabled = self.interactive_board.toggle_edit_mode()
+
+        if enabled:
+            self.correct_button.config(text="Salir de corrección")
+            self.board_help_label.config(
+                text="Modo corrección: clic izquierdo para mover piezas libremente. Clic derecho para borrar o cambiar una pieza."
+            )
+            self.status_var.set(
+                "Modo corrección activado. Pulsa 'Analizar nueva posición' cuando termines de corregir."
+            )
+        else:
+            self.correct_button.config(text="Corregir posiciones")
+            self.board_help_label.config(
+                text="Modo análisis: clic en una pieza y luego en la casilla destino."
+            )
+            self.status_var.set("Modo corrección desactivado.")
+
+    def on_board_position_changed(self, new_fen: str, action: str):
         self.current_fen = new_fen
         self.update_current_fen_label()
-        self.status_var.set(
-            f"Movimiento aplicado: {move_uci}. Pulsa 'Analizar nueva posición' para actualizar resultados."
-        )
-        self.undo_button.config(state="normal")
-        self.reanalyze_button.config(state="normal")
-        self.reset_board_button.config(state="normal")
-        self.view_image_button.config(
-            state="normal" if (self.current_image_path and self.current_fen) else "disabled"
-        )
+        self.refresh_board_buttons()
+
+        if action.startswith("edit"):
+            self.status_var.set(
+                "Corrección aplicada. Pulsa 'Analizar nueva posición' para actualizar resultados."
+            )
+        elif action == "legal_move":
+            self.status_var.set(
+                "Movimiento aplicado. Pulsa 'Analizar nueva posición' para actualizar resultados."
+            )
+        elif action == "undo":
+            self.status_var.set(
+                "Cambio deshecho. Pulsa 'Analizar nueva posición' para actualizar resultados."
+            )
+        elif action == "reset":
+            self.status_var.set("Se ha vuelto a la posición inicial detectada.")
 
     def reanalyze_current_board(self):
-        fen = self.interactive_board.get_fen()
+        if not self.is_position_analyzable():
+            return
+
+        fen = self.get_clean_board_fen()
+
         if fen:
             self.current_fen = fen
             self.update_current_fen_label()
             self.start_fen_analysis(fen)
 
-    def undo_interactive_move(self):
-        ok = self.interactive_board.undo_last_move()
+    def undo_board_change(self):
+        ok = self.interactive_board.undo_last_change()
         if ok:
-            fen = self.interactive_board.get_fen()
-            self.current_fen = fen
+            self.current_fen = self.interactive_board.get_fen()
             self.update_current_fen_label()
+            self.refresh_board_buttons()
             self.status_var.set(
-                "Movimiento deshecho. Pulsa 'Analizar nueva posición' para actualizar resultados."
+                "Cambio deshecho. Pulsa 'Analizar nueva posición' para actualizar resultados."
             )
-            if not self.interactive_board.board.move_stack:
-                self.undo_button.config(state="disabled")
 
     def reset_interactive_board(self):
         if not self.detected_fen:
             return
+
         self.interactive_board.set_fen(self.detected_fen)
         self.current_fen = self.detected_fen
         self.current_report = self.detected_report
+
         self.update_current_fen_label()
         self.update_opening_title()
         self.render_tables()
         self.render_graphs()
-        self.undo_button.config(state="disabled")
-        self.reanalyze_button.config(state="normal")
-        self.reset_board_button.config(state="normal")
-        self.view_image_button.config(
-            state="normal" if (self.current_image_path and self.current_fen) else "disabled"
-        )
-        self.status_var.set("Se ha vuelto a la posición inicial detectada")
+        self.refresh_board_buttons()
+
+        self.status_var.set("Se ha vuelto a la posición inicial detectada.")
 
     def start_fen_analysis(self, fen: str):
         self.set_busy(True, "Analizando nueva posición...")
@@ -710,7 +831,7 @@ class ChessApp:
 
     def _run_fen_analysis_worker(self, fen: str):
         try:
-            lichess_api = LichessAPI(token="lip_SqnA7wQRFb6fyUmRIqnb")
+            lichess_api = LichessAPI(token=None)
 
             report = lichess_api.build_report(
                 fen=fen,
@@ -743,6 +864,11 @@ class ChessApp:
         self.update_opening_title()
         self.render_tables()
         self.render_graphs()
+        self.refresh_board_buttons()
+
+    # ------------------------------------------------------------------
+    # Load initial analysis from saved files
+    # ------------------------------------------------------------------
 
     def load_results(self, result_dir):
         fen_path = os.path.join(result_dir, "fen.txt")
@@ -770,15 +896,14 @@ class ChessApp:
 
         if fen:
             self.interactive_board.set_fen(fen)
-            self.reset_board_button.config(state="normal")
-            self.reanalyze_button.config(state="normal")
-            self.undo_button.config(state="disabled")
-            self.view_image_button.config(
-                state="normal" if (self.current_image_path and self.current_fen) else "disabled"
-            )
+            self.refresh_board_buttons()
 
         self.render_tables()
         self.render_graphs()
+
+    # ------------------------------------------------------------------
+    # Tables
+    # ------------------------------------------------------------------
 
     def render_tables(self):
         self.clear_tree(self.stats_tree)
@@ -858,6 +983,10 @@ class ChessApp:
         self.tables_canvas.update_idletasks()
         self.tables_canvas.configure(scrollregion=self.tables_canvas.bbox("all"))
         self.tables_canvas.yview_moveto(0)
+
+    # ------------------------------------------------------------------
+    # Graphs
+    # ------------------------------------------------------------------
 
     def render_graphs(self):
         self.clear_graphs()
