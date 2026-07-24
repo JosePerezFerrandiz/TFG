@@ -248,23 +248,40 @@ def crop_board_with_neural_dual(image_path: str, square_length: int,
 ################################################################################
 
 
-def detect_pieces(model: YOLO, image: np.ndarray, conf: float = CONF_THRES):
+def detect_pieces(
+    model: YOLO,
+    image: np.ndarray,
+    conf: float = CONF_THRES,
+    save_path: str | None = None,
+):
     results = model.predict(image, conf=conf, verbose=False)
+
+    # Guardar imagen con cajas, etiquetas y confianza de YOLO
+    if save_path is not None and len(results) > 0:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+        annotated_img = results[0].plot(
+            boxes=True,
+            labels=True,
+            conf=True,
+        )
+
+        cv2.imwrite(save_path, annotated_img)
+
     detections = []
 
     for result in results:
-        if result.boxes is None:
-            continue
+        for b in result.boxes:
+            x1, y1, x2, y2 = b.xyxy[0].cpu().numpy()
+            cls_id = int(b.cls[0].item())
+            score = float(b.conf[0].item())
 
-        xyxy = result.boxes.xyxy.cpu().numpy().astype(int)
-        cls = result.boxes.cls.cpu().numpy().astype(int)
-        scores = result.boxes.conf.cpu().numpy()
+            box = [float(x1), float(y1), float(x2), float(y2)]
 
-        for box, c, score in zip(xyxy, cls, scores):
-            detections.append((box, c, float(score)))
+            
+            detections.append((box, cls_id, score))
 
     return detections
-
 
 
 def draw_grid_on_rect(image: np.ndarray, board_rect, with_numbers=True):
@@ -574,7 +591,14 @@ def run_piece_pipeline(crops: dict, args, result_dir: str):
     tight_grid_image = draw_grid_on_rect(tight_crop, tight_board_rect)
     detection_grid_image = draw_grid_on_rect(detection_crop, detection_board_rect)
 
-    detections = detect_pieces(model, detection_crop, conf=args.conf)
+    yolo_debug_path = os.path.join(result_dir, "detecciones_yolo.jpg")
+
+    detections = detect_pieces(
+        model,
+        detection_crop,
+        conf=args.conf,
+        save_path=yolo_debug_path,
+    )
 
     detected_image = detection_grid_image.copy()
     assigned_raw, square_debug_raw = assign_detections_to_cells(
@@ -629,8 +653,8 @@ def run_piece_pipeline(crops: dict, args, result_dir: str):
         report = lichess_api.build_report(
             fen=fen_code,
             variant="standard",
-            moves=12,
-            masters_top_games=10,
+            moves=6,
+            masters_top_games=5,
             lichess_top_games=0,
             recent_games=0,
             include_raw=True,

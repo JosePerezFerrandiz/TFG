@@ -53,10 +53,12 @@ class ChessApp:
         self.detected_fen = None
         self.current_image_path = None
         self.last_detected_opening_text = None
+        self.preview_photo = None
 
         self.pie_canvas = None
         self.bar_canvas = None
         self.graphs_window_id = None
+        self._resize_graph_job = None
 
         self._build_ui()
 
@@ -188,12 +190,21 @@ class ChessApp:
         )
         self.board_help_label.pack(anchor="w", pady=(0, 6))
 
+        self.board_container = ttk.Frame(left_frame)
+        self.board_container.pack(fill="both", expand=True)
+
+        self.preview_label = ttk.Label(
+            self.board_container,
+            anchor="center",
+            text="Selecciona una imagen para comenzar",
+        )
+        self.preview_label.pack(fill="both", expand=True)
+
         self.interactive_board = EditableBoard(
-            left_frame,
+            self.board_container,
             on_position_changed=self.on_board_position_changed,
             square_size=68,
         )
-        self.interactive_board.pack(fill="both", expand=True)
 
         self.current_fen_label = ttk.Label(
             left_frame,
@@ -331,7 +342,7 @@ class ChessApp:
             games_inner,
             columns=("white", "black", "fecha", "ganador"),
             show="headings",
-            height=10,
+            height=5,
         )
         for col, text, width in [
             ("white", "Blancas", 220),
@@ -373,16 +384,30 @@ class ChessApp:
         graphs_container.pack(fill="both", expand=True)
 
         self.graphs_canvas = tk.Canvas(graphs_container, highlightthickness=0)
-        self.graphs_scrollbar = ttk.Scrollbar(
+
+        self.graphs_scrollbar_y = ttk.Scrollbar(
             graphs_container,
             orient="vertical",
             command=self.graphs_canvas.yview,
         )
-        self.graphs_canvas.configure(yscrollcommand=self.graphs_scrollbar.set)
 
-        self.graphs_scrollbar.pack(side="right", fill="y")
-        self.graphs_canvas.pack(side="left", fill="both", expand=True)
+        self.graphs_scrollbar_x = ttk.Scrollbar(
+            graphs_container,
+            orient="horizontal",
+            command=self.graphs_canvas.xview,
+        )
 
+        self.graphs_canvas.configure(
+            yscrollcommand=self.graphs_scrollbar_y.set,
+            xscrollcommand=self.graphs_scrollbar_x.set,
+        )
+
+        self.graphs_canvas.grid(row=0, column=0, sticky="nsew")
+        self.graphs_scrollbar_y.grid(row=0, column=1, sticky="ns")
+        self.graphs_scrollbar_x.grid(row=1, column=0, sticky="ew")
+
+        graphs_container.rowconfigure(0, weight=1)
+        graphs_container.columnconfigure(0, weight=1)
         self.graphs_content = ttk.Frame(self.graphs_canvas)
         self.graphs_window_id = self.graphs_canvas.create_window(
             (0, 0),
@@ -431,7 +456,23 @@ class ChessApp:
 
     def _on_graphs_canvas_configure(self, event):
         if self.graphs_window_id is not None:
-            self.graphs_canvas.itemconfigure(self.graphs_window_id, width=event.width)
+            # El contenido se adapta al ancho real de la pestaña.
+            self.graphs_canvas.itemconfigure(
+                self.graphs_window_id,
+                width=event.width,
+            )
+
+        # Redibujar con un pequeño retardo para evitar hacerlo muchas veces seguidas.
+        if self._resize_graph_job is not None:
+            self.root.after_cancel(self._resize_graph_job)
+
+        self._resize_graph_job = self.root.after(300, self._redraw_graphs_after_resize)
+
+    def _redraw_graphs_after_resize(self):
+        self._resize_graph_job = None
+
+        if self.current_report:
+            self.render_graphs()
 
     def _on_mousewheel_graphs(self, event):
         if event.delta:
@@ -441,12 +482,25 @@ class ChessApp:
         elif getattr(event, "num", None) == 5:
             self.graphs_canvas.yview_scroll(1, "units")
 
+    def _on_shift_mousewheel_graphs(self, event):
+        if event.delta:
+            self.graphs_canvas.xview_scroll(int(-1 * (event.delta / 120)), "units")
+        elif getattr(event, "num", None) == 4:
+            self.graphs_canvas.xview_scroll(-1, "units")
+        elif getattr(event, "num", None) == 5:
+            self.graphs_canvas.xview_scroll(1, "units")
+
     def _bind_graph_mousewheel(self):
         widgets = [self.graphs_canvas, self.graphs_content, self.pie_frame, self.bar_frame]
+
         for widget in widgets:
             widget.bind("<MouseWheel>", self._on_mousewheel_graphs)
             widget.bind("<Button-4>", self._on_mousewheel_graphs)
             widget.bind("<Button-5>", self._on_mousewheel_graphs)
+
+            widget.bind("<Shift-MouseWheel>", self._on_shift_mousewheel_graphs)
+            widget.bind("<Shift-Button-4>", self._on_shift_mousewheel_graphs)
+            widget.bind("<Shift-Button-5>", self._on_shift_mousewheel_graphs)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -510,6 +564,20 @@ class ChessApp:
         for item in tree.get_children():
             tree.delete(item)
 
+    def get_responsive_graph_size(self):
+        canvas_width = self.graphs_canvas.winfo_width()
+        canvas_height = self.graphs_canvas.winfo_height()
+
+        canvas_width = max(canvas_width, 500)
+        canvas_height = max(canvas_height, 420)
+
+        dpi = 100
+
+        fig_width = max(5.0, min((canvas_width - 40) / dpi, 9.5))
+        fig_height = max(3.8, min((canvas_height * 0.55) / dpi, 5.2))
+
+        return fig_width, fig_height, dpi
+
     def get_source_block(self, report, source_name):
         source_key = "lichess" if source_name == "Lichess" else "masters"
         return report.get(source_key, {})
@@ -537,6 +605,49 @@ class ChessApp:
             self.current_fen_label.config(text=f"FEN actual: {self.current_fen}")
         else:
             self.current_fen_label.config(text="FEN actual: -")
+
+    def show_image_preview(self, image_path):
+        try:
+            from PIL import Image, ImageTk
+        except ImportError:
+            self.interactive_board.pack_forget()
+            self.preview_label.pack(fill="both", expand=True)
+            self.preview_label.configure(
+                text="Para ver la vista previa instala Pillow:\n\npip install pillow",
+                image="",
+            )
+            self.preview_photo = None
+            return
+
+        # Oculta el tablero y muestra la imagen seleccionada.
+        self.interactive_board.pack_forget()
+        self.preview_label.pack(fill="both", expand=True)
+
+        self.preview_label.configure(text="Cargando imagen...", image="")
+        self.root.update_idletasks()
+
+        try:
+            img = Image.open(image_path)
+
+            # Usar el tamaño real disponible del contenedor.
+            max_w = max(300, self.board_container.winfo_width() - 20)
+            max_h = max(300, self.board_container.winfo_height() - 20)
+
+            img.thumbnail((max_w, max_h))
+
+            self.preview_photo = ImageTk.PhotoImage(img)
+            self.preview_label.configure(image=self.preview_photo, text="")
+
+        except Exception as e:
+            self.preview_label.configure(
+                text=f"No se pudo cargar la imagen:\n{e}",
+                image="",
+            )
+            self.preview_photo = None
+
+    def show_interactive_board(self):
+        self.preview_label.pack_forget()
+        self.interactive_board.pack(fill="both", expand=True)
 
     def update_opening_title(self):
         opening_text = None
@@ -648,6 +759,9 @@ class ChessApp:
         )
         if path:
             self.image_path_var.set(path)
+            self.current_image_path = path
+            self.show_image_preview(path)
+            self.status_var.set("Imagen cargada. Pulsa 'Analizar imagen' para comenzar.")
 
     def run_analysis(self):
         image_path = self.image_path_var.get().strip()
@@ -689,6 +803,7 @@ class ChessApp:
         self.update_current_fen_label()
         self.clear_graphs()
         self.current_image_path = image_path
+        self.show_image_preview(image_path)
         self.set_busy(True, "Analizando imagen...")
 
         thread = threading.Thread(
@@ -809,6 +924,7 @@ class ChessApp:
             return
 
         self.interactive_board.set_fen(self.detected_fen)
+        self.show_interactive_board()
         self.current_fen = self.detected_fen
         self.current_report = self.detected_report
 
@@ -854,8 +970,20 @@ class ChessApp:
 
     def _on_fen_analysis_error(self, error_text):
         self.set_busy(False, "Listo")
-        messagebox.showerror("Error", f"No se pudo analizar la nueva posición:\n{error_text}")
+        self.refresh_board_buttons()
 
+        if "timed out" in error_text or "ConnectTimeout" in error_text:
+            messagebox.showwarning(
+                "Lichess no responde",
+                "La posición corregida se ha actualizado en el tablero, pero Lichess no ha respondido a tiempo.\n\n"
+                "Puedes volver a pulsar 'Analizar nueva posición' dentro de unos segundos.\n\n"
+                "No es un error de la corrección del tablero."
+            )
+        else:
+            messagebox.showerror(
+                "Error",
+                f"No se pudo analizar la nueva posición:\n{error_text}"
+            )
     def _on_fen_analysis_finished(self, report, fen: str):
         self.set_busy(False, "Nueva posición analizada")
         self.current_report = report
@@ -896,6 +1024,7 @@ class ChessApp:
 
         if fen:
             self.interactive_board.set_fen(fen)
+            self.show_interactive_board()
             self.refresh_board_buttons()
 
         self.render_tables()
@@ -1002,6 +1131,9 @@ class ChessApp:
         if not moves:
             return
 
+        fig_width, fig_height, dpi = self.get_responsive_graph_size()
+        canvas_width = self.graphs_canvas.winfo_width()
+
         labels = [m.get("san", "?") for m in moves]
         sizes = [m.get("game_count", 0) for m in moves]
 
@@ -1015,7 +1147,7 @@ class ChessApp:
             pie_labels.append("Otras")
             pie_sizes.append(other_games)
 
-        fig1, ax1 = plt.subplots(figsize=(6.6, 4.8), dpi=100)
+        fig1, ax1 = plt.subplots(figsize=(fig_width, fig_height), dpi=dpi)
         colors = plt.cm.Set3(range(len(pie_sizes)))
 
         wedges, texts, autotexts = ax1.pie(
@@ -1037,10 +1169,7 @@ class ChessApp:
         )
         ax1.axis("equal")
 
-        legend_labels = []
-        for label, size in zip(pie_labels, pie_sizes):
-            pct = (size / total_games * 100) if total_games > 0 else 0
-            legend_labels.append(f"{label} — {size} partidas ({pct:.1f}%)")
+        legend_labels = pie_labels
 
         ax1.legend(
             wedges,
@@ -1051,7 +1180,7 @@ class ChessApp:
             frameon=False,
         )
 
-        fig1.subplots_adjust(left=0.06, right=0.70, top=0.86, bottom=0.08)
+        fig1.subplots_adjust(left=0.06, right=0.72, top=0.86, bottom=0.08)
 
         self.pie_canvas = FigureCanvasTkAgg(fig1, master=self.pie_frame)
         self.pie_canvas.draw()
@@ -1065,7 +1194,7 @@ class ChessApp:
 
         x = list(range(len(bar_labels)))
 
-        fig2, ax2 = plt.subplots(figsize=(7.8, 4.8), dpi=100)
+        fig2, ax2 = plt.subplots(figsize=(fig_width, fig_height), dpi=dpi)
 
         ax2.bar(x, white, label="Blancas")
         ax2.bar(x, draws, bottom=white, label="Tablas")
@@ -1073,7 +1202,10 @@ class ChessApp:
         ax2.bar(x, black, bottom=bottom_black, label="Negras")
 
         ax2.set_xticks(x)
-        ax2.set_xticklabels(bar_labels)
+        if canvas_width < 750:
+            ax2.set_xticklabels(bar_labels, rotation=25, ha="right", fontsize=8)
+        else:
+            ax2.set_xticklabels(bar_labels, fontsize=9)
         ax2.set_ylabel("Porcentaje")
         ax2.set_ylim(0, 100)
         ax2.set_title(f"Resultados por jugada ({self.graph_source_var.get()})", pad=14)
@@ -1095,7 +1227,10 @@ class ChessApp:
                     fontsize=8,
                 )
 
-        fig2.subplots_adjust(left=0.10, right=0.97, top=0.86, bottom=0.14)
+        if canvas_width < 750:
+            fig2.subplots_adjust(left=0.12, right=0.96, top=0.84, bottom=0.24)
+        else:
+            fig2.subplots_adjust(left=0.10, right=0.97, top=0.86, bottom=0.14)
 
         self.bar_canvas = FigureCanvasTkAgg(fig2, master=self.bar_frame)
         self.bar_canvas.draw()

@@ -240,14 +240,14 @@ class EditableBoard(ttk.Frame):
                         font=("Segoe UI Symbol", max(16, int(self.square_size * 0.52))),
                     )
 
-        mode_text = "Modo corrección" if self.edit_mode else "Modo análisis"
-        self.canvas.create_text(
-            width - 10,
-            10,
-            text=mode_text,
-            anchor="ne",
-            font=("Segoe UI", 10, "bold"),
-        )
+        #mode_text = "Modo corrección" if self.edit_mode else "Modo análisis"
+        #self.canvas.create_text(
+        #    width - 10,
+        #    10,
+        #    text=mode_text,
+        #    anchor="ne",
+        #    font=("Segoe UI", 10, "bold"),
+        #)
 
     def _on_left_click(self, event) -> None:
         clicked_square = self._coords_to_square(event.x, event.y)
