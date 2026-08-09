@@ -947,7 +947,7 @@ class ChessApp:
 
     def _run_fen_analysis_worker(self, fen: str):
         try:
-            lichess_api = LichessAPI(token=None)
+            lichess_api = LichessAPI(token="lip_SqnA7wQRFb6fyUmRIqnb")
 
             report = lichess_api.build_report(
                 fen=fen,
