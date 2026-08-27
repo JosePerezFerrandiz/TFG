@@ -12,7 +12,7 @@ class LichessAPI:
     BEST_MOVES_TO_SHOW = 5
     MIN_GAMES_FOR_BEST_MOVE = 20
 
-    def __init__(self, token: Optional[str] = None, timeout: int = 20):
+    def __init__(self, token: Optional[str] = None, timeout: int = 60):
         self.base_url = "https://explorer.lichess.ovh"
         self.timeout = timeout
 

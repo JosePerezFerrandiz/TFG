@@ -16,14 +16,6 @@ test/steps/
 test/out/
 test/in/
 
-# Datos locales
-data/
-
-# Modelos y pesos pesados
-*.pt
-*.pth
-*.onnx
-*.weights
 
 # Archivos temporales y logs
 *.log

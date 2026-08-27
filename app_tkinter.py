@@ -7,10 +7,11 @@ import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+import chess
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-from interactive_board import InteractiveBoard
+from editable_board import EditableBoard
 from lichessAPI import LichessAPI
 
 
@@ -29,7 +30,7 @@ class ChessApp:
     def __init__(self, root):
         self.root = root
         self.root.title("TFG Ajedrez - Análisis desde imagen")
-        self.root.geometry("1450x930")
+        self.root.geometry("1500x950")
 
         self.image_path_var = tk.StringVar()
         self.turn_var = tk.StringVar(value="Automático")
@@ -37,7 +38,7 @@ class ChessApp:
         self.graph_source_var = tk.StringVar(value="Lichess")
         self.table_source_var = tk.StringVar(value="Lichess")
         self.status_var = tk.StringVar(value="Listo")
-        self.opening_var = tk.StringVar(value="Apertura actual: -")
+        self.opening_title_var = tk.StringVar(value="Apertura: -")
 
         self.rot_options = {
             "Sin rotación": "none",
@@ -50,10 +51,14 @@ class ChessApp:
         self.detected_report = None
         self.current_fen = None
         self.detected_fen = None
+        self.current_image_path = None
+        self.last_detected_opening_text = None
+        self.preview_photo = None
 
         self.pie_canvas = None
         self.bar_canvas = None
         self.graphs_window_id = None
+        self._resize_graph_job = None
 
         self._build_ui()
 
@@ -106,6 +111,24 @@ class ChessApp:
 
         top_frame.columnconfigure(1, weight=1)
 
+        opening_frame = ttk.Frame(self.root, padding=(10, 2, 10, 8))
+        opening_frame.pack(fill="x")
+
+        ttk.Label(
+            opening_frame,
+            text="Apertura detectada",
+            font=("Segoe UI", 11, "bold"),
+        ).pack(anchor="center")
+
+        self.opening_title_label = ttk.Label(
+            opening_frame,
+            textvariable=self.opening_title_var,
+            font=("Segoe UI", 16, "bold"),
+            anchor="center",
+            justify="center",
+        )
+        self.opening_title_label.pack(fill="x", pady=(2, 0))
+
         middle_frame = ttk.Panedwindow(self.root, orient="horizontal")
         middle_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -115,14 +138,14 @@ class ChessApp:
         middle_frame.add(left_frame, weight=3)
         middle_frame.add(right_frame, weight=5)
 
-        # ---------------- Izquierda: solo tablero interactivo ----------------
+        # ---------------- Izquierda: tablero editable/interactivo ----------------
         board_top = ttk.Frame(left_frame)
         board_top.pack(fill="x", pady=(0, 8))
 
         self.undo_button = ttk.Button(
             board_top,
             text="Deshacer",
-            command=self.undo_interactive_move,
+            command=self.undo_board_change,
             state="disabled",
         )
         self.undo_button.pack(side="left")
@@ -135,6 +158,14 @@ class ChessApp:
         )
         self.reset_board_button.pack(side="left", padx=(8, 0))
 
+        self.correct_button = ttk.Button(
+            board_top,
+            text="Corregir posiciones",
+            command=self.toggle_correction_mode,
+            state="disabled",
+        )
+        self.correct_button.pack(side="left", padx=(8, 0))
+
         self.reanalyze_button = ttk.Button(
             board_top,
             text="Analizar nueva posición",
@@ -143,33 +174,45 @@ class ChessApp:
         )
         self.reanalyze_button.pack(side="left", padx=(8, 0))
 
-        ttk.Label(
-            left_frame,
-            text="Haz clic en una pieza y luego en la casilla destino.",
-        ).pack(anchor="w", pady=(0, 6))
+        self.view_image_button = ttk.Button(
+            board_top,
+            text="Ver imagen",
+            command=self.show_compare_window,
+            state="disabled",
+        )
+        self.view_image_button.pack(side="left", padx=(8, 0))
 
-        self.interactive_board = InteractiveBoard(
+        self.board_help_label = ttk.Label(
             left_frame,
+            text="Modo análisis: clic en una pieza y luego en la casilla destino.",
+            wraplength=520,
+            justify="left",
+        )
+        self.board_help_label.pack(anchor="w", pady=(0, 6))
+
+        self.board_container = ttk.Frame(left_frame)
+        self.board_container.pack(fill="both", expand=True)
+
+        self.preview_label = ttk.Label(
+            self.board_container,
+            anchor="center",
+            text="Selecciona una imagen para comenzar",
+        )
+        self.preview_label.pack(fill="both", expand=True)
+
+        self.interactive_board = EditableBoard(
+            self.board_container,
             on_position_changed=self.on_board_position_changed,
             square_size=68,
         )
-        self.interactive_board.pack(fill="both", expand=True)
 
         self.current_fen_label = ttk.Label(
             left_frame,
             text="FEN actual: -",
-            wraplength=500,
+            wraplength=520,
             justify="left",
         )
         self.current_fen_label.pack(fill="x", pady=(8, 0))
-        
-        self.opening_label = ttk.Label(
-            left_frame,
-            textvariable=self.opening_var,
-            wraplength=500,
-            justify="left",
-        )
-        self.opening_label.pack(fill="x", pady=(6, 0))
 
         # ---------------- Derecha: tablas y gráficas ----------------
         self.notebook = ttk.Notebook(right_frame)
@@ -286,7 +329,10 @@ class ChessApp:
             self.best_tree.column(col, width=width, anchor="center")
         self.best_tree.pack(fill="x", expand=True, padx=5, pady=5)
 
-        games_frame = ttk.LabelFrame(self.tables_content, text="Partidas destacadas de grandes maestros")
+        games_frame = ttk.LabelFrame(
+            self.tables_content,
+            text="Partidas destacadas de grandes maestros",
+        )
         games_frame.pack(fill="both", expand=True, pady=(0, 8))
 
         games_inner = ttk.Frame(games_frame)
@@ -296,7 +342,7 @@ class ChessApp:
             games_inner,
             columns=("white", "black", "fecha", "ganador"),
             show="headings",
-            height=10,
+            height=5,
         )
         for col, text, width in [
             ("white", "Blancas", 220),
@@ -306,7 +352,11 @@ class ChessApp:
         ]:
             self.games_tree.heading(col, text=text)
             self.games_tree.column(col, width=width, anchor="center")
-        games_scroll = ttk.Scrollbar(games_inner, orient="vertical", command=self.games_tree.yview)
+        games_scroll = ttk.Scrollbar(
+            games_inner,
+            orient="vertical",
+            command=self.games_tree.yview,
+        )
         self.games_tree.configure(yscrollcommand=games_scroll.set)
 
         self.games_tree.pack(side="left", fill="both", expand=True)
@@ -334,16 +384,30 @@ class ChessApp:
         graphs_container.pack(fill="both", expand=True)
 
         self.graphs_canvas = tk.Canvas(graphs_container, highlightthickness=0)
-        self.graphs_scrollbar = ttk.Scrollbar(
+
+        self.graphs_scrollbar_y = ttk.Scrollbar(
             graphs_container,
             orient="vertical",
             command=self.graphs_canvas.yview,
         )
-        self.graphs_canvas.configure(yscrollcommand=self.graphs_scrollbar.set)
 
-        self.graphs_scrollbar.pack(side="right", fill="y")
-        self.graphs_canvas.pack(side="left", fill="both", expand=True)
+        self.graphs_scrollbar_x = ttk.Scrollbar(
+            graphs_container,
+            orient="horizontal",
+            command=self.graphs_canvas.xview,
+        )
 
+        self.graphs_canvas.configure(
+            yscrollcommand=self.graphs_scrollbar_y.set,
+            xscrollcommand=self.graphs_scrollbar_x.set,
+        )
+
+        self.graphs_canvas.grid(row=0, column=0, sticky="nsew")
+        self.graphs_scrollbar_y.grid(row=0, column=1, sticky="ns")
+        self.graphs_scrollbar_x.grid(row=1, column=0, sticky="ew")
+
+        graphs_container.rowconfigure(0, weight=1)
+        graphs_container.columnconfigure(0, weight=1)
         self.graphs_content = ttk.Frame(self.graphs_canvas)
         self.graphs_window_id = self.graphs_canvas.create_window(
             (0, 0),
@@ -392,7 +456,23 @@ class ChessApp:
 
     def _on_graphs_canvas_configure(self, event):
         if self.graphs_window_id is not None:
-            self.graphs_canvas.itemconfigure(self.graphs_window_id, width=event.width)
+            # El contenido se adapta al ancho real de la pestaña.
+            self.graphs_canvas.itemconfigure(
+                self.graphs_window_id,
+                width=event.width,
+            )
+
+        # Redibujar con un pequeño retardo para evitar hacerlo muchas veces seguidas.
+        if self._resize_graph_job is not None:
+            self.root.after_cancel(self._resize_graph_job)
+
+        self._resize_graph_job = self.root.after(300, self._redraw_graphs_after_resize)
+
+    def _redraw_graphs_after_resize(self):
+        self._resize_graph_job = None
+
+        if self.current_report:
+            self.render_graphs()
 
     def _on_mousewheel_graphs(self, event):
         if event.delta:
@@ -402,25 +482,75 @@ class ChessApp:
         elif getattr(event, "num", None) == 5:
             self.graphs_canvas.yview_scroll(1, "units")
 
+    def _on_shift_mousewheel_graphs(self, event):
+        if event.delta:
+            self.graphs_canvas.xview_scroll(int(-1 * (event.delta / 120)), "units")
+        elif getattr(event, "num", None) == 4:
+            self.graphs_canvas.xview_scroll(-1, "units")
+        elif getattr(event, "num", None) == 5:
+            self.graphs_canvas.xview_scroll(1, "units")
+
     def _bind_graph_mousewheel(self):
         widgets = [self.graphs_canvas, self.graphs_content, self.pie_frame, self.bar_frame]
+
         for widget in widgets:
             widget.bind("<MouseWheel>", self._on_mousewheel_graphs)
             widget.bind("<Button-4>", self._on_mousewheel_graphs)
             widget.bind("<Button-5>", self._on_mousewheel_graphs)
 
+            widget.bind("<Shift-MouseWheel>", self._on_shift_mousewheel_graphs)
+            widget.bind("<Shift-Button-4>", self._on_shift_mousewheel_graphs)
+            widget.bind("<Shift-Button-5>", self._on_shift_mousewheel_graphs)
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
+    def has_undo_available(self):
+        return bool(self.interactive_board.board.move_stack) or bool(self.interactive_board.edit_history)
+
     def set_busy(self, busy: bool, status_text: str):
         self.status_var.set(status_text)
         self.analyze_image_button.config(state="disabled" if busy else "normal")
-        self.undo_button.config(state="disabled" if busy or not self.interactive_board.board.move_stack else "normal")
+        self.undo_button.config(state="normal" if (not busy and self.has_undo_available()) else "disabled")
         self.reset_board_button.config(state="normal" if (not busy and self.detected_fen) else "disabled")
+        self.correct_button.config(state="normal" if (not busy and self.current_fen) else "disabled")
         self.reanalyze_button.config(state="normal" if (not busy and self.current_fen) else "disabled")
+        self.view_image_button.config(
+            state="normal" if (not busy and self.current_image_path and self.current_fen) else "disabled"
+        )
         self.root.config(cursor="watch" if busy else "")
         self.root.update_idletasks()
+
+    def refresh_board_buttons(self):
+        self.undo_button.config(state="normal" if self.has_undo_available() else "disabled")
+        self.reset_board_button.config(state="normal" if self.detected_fen else "disabled")
+        self.correct_button.config(state="normal" if self.current_fen else "disabled")
+        self.reanalyze_button.config(state="normal" if self.current_fen else "disabled")
+        self.view_image_button.config(
+            state="normal" if (self.current_image_path and self.current_fen) else "disabled"
+        )
+
+    def get_clean_board_fen(self):
+        board = self.interactive_board.board.copy(stack=False)
+        board.castling_rights = board.clean_castling_rights()
+        board.ep_square = None
+        return board.fen()
+
+    def is_position_analyzable(self):
+        board = self.interactive_board.board
+        white_kings = len(board.pieces(chess.KING, chess.WHITE))
+        black_kings = len(board.pieces(chess.KING, chess.BLACK))
+
+        if white_kings != 1 or black_kings != 1:
+            messagebox.showwarning(
+                "Posición no válida",
+                "Para analizar la posición debe haber exactamente un rey blanco y un rey negro.\n\n"
+                "Corrige la posición antes de pulsar 'Analizar nueva posición'.",
+            )
+            return False
+
+        return True
 
     def clear_graphs(self):
         if self.pie_canvas is not None:
@@ -433,6 +563,20 @@ class ChessApp:
     def clear_tree(self, tree):
         for item in tree.get_children():
             tree.delete(item)
+
+    def get_responsive_graph_size(self):
+        canvas_width = self.graphs_canvas.winfo_width()
+        canvas_height = self.graphs_canvas.winfo_height()
+
+        canvas_width = max(canvas_width, 500)
+        canvas_height = max(canvas_height, 420)
+
+        dpi = 100
+
+        fig_width = max(5.0, min((canvas_width - 40) / dpi, 9.5))
+        fig_height = max(3.8, min((canvas_height * 0.55) / dpi, 5.2))
+
+        return fig_width, fig_height, dpi
 
     def get_source_block(self, report, source_name):
         source_key = "lichess" if source_name == "Lichess" else "masters"
@@ -461,21 +605,145 @@ class ChessApp:
             self.current_fen_label.config(text=f"FEN actual: {self.current_fen}")
         else:
             self.current_fen_label.config(text="FEN actual: -")
-    
-    def update_opening_label(self):
+
+    def show_image_preview(self, image_path):
+        try:
+            from PIL import Image, ImageTk
+        except ImportError:
+            self.interactive_board.pack_forget()
+            self.preview_label.pack(fill="both", expand=True)
+            self.preview_label.configure(
+                text="Para ver la vista previa instala Pillow:\n\npip install pillow",
+                image="",
+            )
+            self.preview_photo = None
+            return
+
+        # Oculta el tablero y muestra la imagen seleccionada.
+        self.interactive_board.pack_forget()
+        self.preview_label.pack(fill="both", expand=True)
+
+        self.preview_label.configure(text="Cargando imagen...", image="")
+        self.root.update_idletasks()
+
+        try:
+            img = Image.open(image_path)
+
+            # Usar el tamaño real disponible del contenedor.
+            max_w = max(300, self.board_container.winfo_width() - 20)
+            max_h = max(300, self.board_container.winfo_height() - 20)
+
+            img.thumbnail((max_w, max_h))
+
+            self.preview_photo = ImageTk.PhotoImage(img)
+            self.preview_label.configure(image=self.preview_photo, text="")
+
+        except Exception as e:
+            self.preview_label.configure(
+                text=f"No se pudo cargar la imagen:\n{e}",
+                image="",
+            )
+            self.preview_photo = None
+
+    def show_interactive_board(self):
+        self.preview_label.pack_forget()
+        self.interactive_board.pack(fill="both", expand=True)
+
+    def update_opening_title(self):
+        opening_text = None
+
         if self.current_report:
             opening = self.current_report.get("opening", {}) or {}
             eco = opening.get("eco")
             name = opening.get("name")
 
             if eco and name:
-                self.opening_var.set(f"Apertura actual: {eco} - {name}")
+                opening_text = f"{eco} — {name}"
             elif name:
-                self.opening_var.set(f"Apertura actual: {name}")
-            else:
-                self.opening_var.set("Apertura actual: Apertura no identificada")
+                opening_text = name
+
+        if opening_text:
+            self.last_detected_opening_text = opening_text
+            self.opening_title_var.set(opening_text)
         else:
-            self.opening_var.set("Apertura actual: -")
+            if self.last_detected_opening_text:
+                self.opening_title_var.set(self.last_detected_opening_text)
+            else:
+                self.opening_title_var.set("Apertura no identificada")
+
+    # ------------------------------------------------------------------
+    # Compare window
+    # ------------------------------------------------------------------
+
+    def show_compare_window(self):
+        if not self.current_image_path or not self.current_fen:
+            messagebox.showwarning(
+                "Aviso",
+                "Primero debes analizar una imagen para poder compararla con el tablero.",
+            )
+            return
+
+        if not os.path.exists(self.current_image_path):
+            messagebox.showerror("Error", "No se encuentra la imagen original.")
+            return
+
+        try:
+            from PIL import Image, ImageTk
+        except ImportError:
+            messagebox.showerror(
+                "Falta Pillow",
+                "Para visualizar imágenes JPG/PNG en esta ventana instala Pillow:\n\npip install pillow",
+            )
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("Comparación: imagen original y tablero virtual")
+        win.geometry("1350x760")
+        win.minsize(900, 560)
+
+        main = ttk.Frame(win, padding=10)
+        main.pack(fill="both", expand=True)
+
+        paned = ttk.Panedwindow(main, orient="horizontal")
+        paned.pack(fill="both", expand=True)
+
+        left = ttk.Frame(paned, padding=5)
+        right = ttk.Frame(paned, padding=5)
+        paned.add(left, weight=1)
+        paned.add(right, weight=1)
+
+        ttk.Label(left, text="Imagen original", font=("Segoe UI", 12, "bold")).pack(anchor="center", pady=(0, 8))
+        ttk.Label(right, text="Tablero virtual actual", font=("Segoe UI", 12, "bold")).pack(anchor="center", pady=(0, 8))
+
+        image_container = ttk.Frame(left)
+        image_container.pack(fill="both", expand=True)
+
+        image_label = ttk.Label(image_container, anchor="center")
+        image_label.pack(fill="both", expand=True)
+
+        def render_image(_event=None):
+            try:
+                img = Image.open(self.current_image_path)
+                max_w = max(300, image_container.winfo_width() - 20)
+                max_h = max(300, image_container.winfo_height() - 20)
+                img.thumbnail((max_w, max_h))
+                photo = ImageTk.PhotoImage(img)
+                image_label.configure(image=photo, text="")
+                image_label.image = photo
+            except Exception as e:
+                image_label.configure(text=f"No se pudo cargar la imagen:\n{e}")
+
+        image_container.bind("<Configure>", render_image)
+        win.after(100, render_image)
+
+        compare_board = EditableBoard(
+            right,
+            on_position_changed=None,
+            square_size=68,
+        )
+        compare_board.pack(fill="both", expand=True)
+        compare_board.set_fen(self.current_fen)
+        compare_board.set_edit_mode(False)
 
     # ------------------------------------------------------------------
     # Image analysis via main.py
@@ -491,6 +759,9 @@ class ChessApp:
         )
         if path:
             self.image_path_var.set(path)
+            self.current_image_path = path
+            self.show_image_preview(path)
+            self.status_var.set("Imagen cargada. Pulsa 'Analizar imagen' para comenzar.")
 
     def run_analysis(self):
         image_path = self.image_path_var.get().strip()
@@ -524,7 +795,15 @@ class ChessApp:
         ]
 
         self.current_report = None
+        self.current_fen = None
+        self.detected_report = None
+        self.detected_fen = None
+        self.last_detected_opening_text = None
+        self.update_opening_title()
+        self.update_current_fen_label()
         self.clear_graphs()
+        self.current_image_path = image_path
+        self.show_image_preview(image_path)
         self.set_busy(True, "Analizando imagen...")
 
         thread = threading.Thread(
@@ -578,50 +857,84 @@ class ChessApp:
         self.load_results(result_dir)
 
     # ------------------------------------------------------------------
-    # FEN analysis via lichessAPI
+    # Board correction / movement
     # ------------------------------------------------------------------
 
-    def on_board_position_changed(self, new_fen: str, move_uci: str):
+    def toggle_correction_mode(self):
+        enabled = self.interactive_board.toggle_edit_mode()
+
+        if enabled:
+            self.correct_button.config(text="Salir de corrección")
+            self.board_help_label.config(
+                text="Modo corrección: clic izquierdo para mover piezas libremente. Clic derecho para borrar o cambiar una pieza."
+            )
+            self.status_var.set(
+                "Modo corrección activado. Pulsa 'Analizar nueva posición' cuando termines de corregir."
+            )
+        else:
+            self.correct_button.config(text="Corregir posiciones")
+            self.board_help_label.config(
+                text="Modo análisis: clic en una pieza y luego en la casilla destino."
+            )
+            self.status_var.set("Modo corrección desactivado.")
+
+    def on_board_position_changed(self, new_fen: str, action: str):
         self.current_fen = new_fen
         self.update_current_fen_label()
-        self.status_var.set(
-            f"Movimiento aplicado: {move_uci}. Pulsa 'Analizar nueva posición' para actualizar resultados."
-        )
-        self.undo_button.config(state="normal")
-        self.reanalyze_button.config(state="normal")
-        self.reset_board_button.config(state="normal")
+        self.refresh_board_buttons()
+
+        if action.startswith("edit"):
+            self.status_var.set(
+                "Corrección aplicada. Pulsa 'Analizar nueva posición' para actualizar resultados."
+            )
+        elif action == "legal_move":
+            self.status_var.set(
+                "Movimiento aplicado. Pulsa 'Analizar nueva posición' para actualizar resultados."
+            )
+        elif action == "undo":
+            self.status_var.set(
+                "Cambio deshecho. Pulsa 'Analizar nueva posición' para actualizar resultados."
+            )
+        elif action == "reset":
+            self.status_var.set("Se ha vuelto a la posición inicial detectada.")
 
     def reanalyze_current_board(self):
-        fen = self.interactive_board.get_fen()
+        if not self.is_position_analyzable():
+            return
+
+        fen = self.get_clean_board_fen()
+
         if fen:
             self.current_fen = fen
             self.update_current_fen_label()
             self.start_fen_analysis(fen)
 
-    def undo_interactive_move(self):
-        ok = self.interactive_board.undo_last_move()
+    def undo_board_change(self):
+        ok = self.interactive_board.undo_last_change()
         if ok:
-            fen = self.interactive_board.get_fen()
-            self.current_fen = fen
+            self.current_fen = self.interactive_board.get_fen()
             self.update_current_fen_label()
-            self.status_var.set("Movimiento deshecho. Pulsa 'Analizar nueva posición' para actualizar resultados.")
-            if not self.interactive_board.board.move_stack:
-                self.undo_button.config(state="disabled")
+            self.refresh_board_buttons()
+            self.status_var.set(
+                "Cambio deshecho. Pulsa 'Analizar nueva posición' para actualizar resultados."
+            )
 
     def reset_interactive_board(self):
         if not self.detected_fen:
             return
+
         self.interactive_board.set_fen(self.detected_fen)
+        self.show_interactive_board()
         self.current_fen = self.detected_fen
         self.current_report = self.detected_report
+
         self.update_current_fen_label()
-        self.update_opening_label()
+        self.update_opening_title()
         self.render_tables()
         self.render_graphs()
-        self.undo_button.config(state="disabled")
-        self.reanalyze_button.config(state="normal")
-        self.reset_board_button.config(state="normal")
-        self.status_var.set("Se ha vuelto a la posición inicial detectada")
+        self.refresh_board_buttons()
+
+        self.status_var.set("Se ha vuelto a la posición inicial detectada.")
 
     def start_fen_analysis(self, fen: str):
         self.set_busy(True, "Analizando nueva posición...")
@@ -657,16 +970,29 @@ class ChessApp:
 
     def _on_fen_analysis_error(self, error_text):
         self.set_busy(False, "Listo")
-        messagebox.showerror("Error", f"No se pudo analizar la nueva posición:\n{error_text}")
+        self.refresh_board_buttons()
 
+        if "timed out" in error_text or "ConnectTimeout" in error_text:
+            messagebox.showwarning(
+                "Lichess no responde",
+                "La posición corregida se ha actualizado en el tablero, pero Lichess no ha respondido a tiempo.\n\n"
+                "Puedes volver a pulsar 'Analizar nueva posición' dentro de unos segundos.\n\n"
+                "No es un error de la corrección del tablero."
+            )
+        else:
+            messagebox.showerror(
+                "Error",
+                f"No se pudo analizar la nueva posición:\n{error_text}"
+            )
     def _on_fen_analysis_finished(self, report, fen: str):
         self.set_busy(False, "Nueva posición analizada")
         self.current_report = report
         self.current_fen = report.get("fen", fen)
         self.update_current_fen_label()
-        self.update_opening_label()
+        self.update_opening_title()
         self.render_tables()
         self.render_graphs()
+        self.refresh_board_buttons()
 
     # ------------------------------------------------------------------
     # Load initial analysis from saved files
@@ -694,13 +1020,12 @@ class ChessApp:
         self.current_fen = fen
         self.detected_fen = fen
         self.update_current_fen_label()
-        self.update_opening_label()
+        self.update_opening_title()
 
         if fen:
             self.interactive_board.set_fen(fen)
-            self.reset_board_button.config(state="normal")
-            self.reanalyze_button.config(state="normal")
-            self.undo_button.config(state="disabled")
+            self.show_interactive_board()
+            self.refresh_board_buttons()
 
         self.render_tables()
         self.render_graphs()
@@ -806,6 +1131,9 @@ class ChessApp:
         if not moves:
             return
 
+        fig_width, fig_height, dpi = self.get_responsive_graph_size()
+        canvas_width = self.graphs_canvas.winfo_width()
+
         labels = [m.get("san", "?") for m in moves]
         sizes = [m.get("game_count", 0) for m in moves]
 
@@ -819,7 +1147,7 @@ class ChessApp:
             pie_labels.append("Otras")
             pie_sizes.append(other_games)
 
-        fig1, ax1 = plt.subplots(figsize=(6.6, 4.8), dpi=100)
+        fig1, ax1 = plt.subplots(figsize=(fig_width, fig_height), dpi=dpi)
         colors = plt.cm.Set3(range(len(pie_sizes)))
 
         wedges, texts, autotexts = ax1.pie(
@@ -841,10 +1169,7 @@ class ChessApp:
         )
         ax1.axis("equal")
 
-        legend_labels = []
-        for label, size in zip(pie_labels, pie_sizes):
-            pct = (size / total_games * 100) if total_games > 0 else 0
-            legend_labels.append(f"{label} — {size} partidas ({pct:.1f}%)")
+        legend_labels = pie_labels
 
         ax1.legend(
             wedges,
@@ -855,7 +1180,7 @@ class ChessApp:
             frameon=False,
         )
 
-        fig1.subplots_adjust(left=0.06, right=0.70, top=0.86, bottom=0.08)
+        fig1.subplots_adjust(left=0.06, right=0.72, top=0.86, bottom=0.08)
 
         self.pie_canvas = FigureCanvasTkAgg(fig1, master=self.pie_frame)
         self.pie_canvas.draw()
@@ -869,7 +1194,7 @@ class ChessApp:
 
         x = list(range(len(bar_labels)))
 
-        fig2, ax2 = plt.subplots(figsize=(7.8, 4.8), dpi=100)
+        fig2, ax2 = plt.subplots(figsize=(fig_width, fig_height), dpi=dpi)
 
         ax2.bar(x, white, label="Blancas")
         ax2.bar(x, draws, bottom=white, label="Tablas")
@@ -877,7 +1202,10 @@ class ChessApp:
         ax2.bar(x, black, bottom=bottom_black, label="Negras")
 
         ax2.set_xticks(x)
-        ax2.set_xticklabels(bar_labels)
+        if canvas_width < 750:
+            ax2.set_xticklabels(bar_labels, rotation=25, ha="right", fontsize=8)
+        else:
+            ax2.set_xticklabels(bar_labels, fontsize=9)
         ax2.set_ylabel("Porcentaje")
         ax2.set_ylim(0, 100)
         ax2.set_title(f"Resultados por jugada ({self.graph_source_var.get()})", pad=14)
@@ -899,7 +1227,10 @@ class ChessApp:
                     fontsize=8,
                 )
 
-        fig2.subplots_adjust(left=0.10, right=0.97, top=0.86, bottom=0.14)
+        if canvas_width < 750:
+            fig2.subplots_adjust(left=0.12, right=0.96, top=0.84, bottom=0.24)
+        else:
+            fig2.subplots_adjust(left=0.10, right=0.97, top=0.86, bottom=0.14)
 
         self.bar_canvas = FigureCanvasTkAgg(fig2, master=self.bar_frame)
         self.bar_canvas.draw()
